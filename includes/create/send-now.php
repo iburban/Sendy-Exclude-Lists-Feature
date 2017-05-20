@@ -1,20 +1,13 @@
 <?php include('../functions.php');?>
 <?php include('../login/auth.php');?>
-<?php include('../helpers/class.phpmailer.php');?>
+<?php include('../helpers/PHPMailerAutoload.php');?>
 <?php include('../helpers/short.php');?>
 <?php include('../functions_exclude_lists.php');?>
+<?php include('../helpers/integrations/zapier/triggers/functions.php');?>
 <?php
 	
 //variables
-/*if (isset($_POST['campaign_id']))
-{*/
-	$campaign_id = mysqli_real_escape_string($mysqli, $_POST['campaign_id']);
-/*}
-elseif (isset($_POST['cid']))
-{
-	$campaign_id = mysqli_real_escape_string($mysqli, $_POST['cid']);
-}*/
-
+$campaign_id = mysqli_real_escape_string($mysqli, $_POST['campaign_id']);
 $email_list_array = $_POST['email_list'];
 $app = mysqli_real_escape_string($mysqli, $_POST['app']);
 $offset = isset($_POST['offset']) ? mysqli_real_escape_string($mysqli, $_POST['offset']) : '';
@@ -38,7 +31,7 @@ if (isset($_POST['email_list_exclude']) && is_array($_POST['email_list_exclude']
 
 
 //get user details
-$q = 'SELECT name, username, send_rate FROM login WHERE id = '.get_app_info('main_userID');
+$q = 'SELECT name, username, send_rate, timezone FROM login WHERE id = '.get_app_info('main_userID');
 $r = mysqli_query($mysqli, $q);
 if ($r)
 {
@@ -47,6 +40,7 @@ if ($r)
 		$my_name = $row['name'];
 		$my_email = $row['username'];
 		$send_rate = $row['send_rate'];
+		$user_timezone = $row['timezone'];
     }  
 }
 
@@ -97,13 +91,7 @@ if($cron)
 	
 	//schedule email to send in the next 5 mins
 	$q = 'UPDATE campaigns SET sent = "'.$time.'", to_send = '.$to_send.', send_date = "'.$the_date.'", lists = "'.$email_list.'" '.$exclude_lists_update_sql.', timezone = "'.$timezone.'" WHERE id = '.$campaign_id;
-	
-	/*echo $q;
-	echo '<pre>';
-	print_r($_POST);
-	echo '</pre>';
-	exit;*/
-	
+
 	$r = mysqli_query($mysqli, $q);
 	if ($r)
 	{
@@ -119,11 +107,6 @@ else
 	flush();
 	echo true;
 }
-
-/*echo '<pre>';
-print_r($_POST);
-echo '</pre>';
-exit;*/
 
 //check if user wants to continue sending to the rest of the recipients because sending was incomplete
 if($offset!='')
@@ -144,7 +127,7 @@ if($offset!='')
 else $the_offset = '';
 
 //select campaign to send email
-$q = 'SELECT from_name, from_email, reply_to, title, label, plain_text, html_text, query_string, to_send, recipients FROM campaigns WHERE id = '.$campaign_id.' AND userID = '.get_app_info('main_userID');
+$q = 'SELECT from_name, from_email, reply_to, title, label, plain_text, html_text, query_string, to_send, recipients, opens_tracking, links_tracking FROM campaigns WHERE id = '.$campaign_id.' AND userID = '.get_app_info('main_userID');
 $r = mysqli_query($mysqli, $q);
 if ($r && mysqli_num_rows($r) > 0)
 {
@@ -160,6 +143,8 @@ if ($r && mysqli_num_rows($r) > 0)
 		$query_string = stripslashes($row['query_string']);
 		$to_send = stripslashes($row['to_send']);
 		$current_recipient_count = $row['recipients'];
+		$opens_tracking = $row['opens_tracking'];
+		$links_tracking = $row['links_tracking'];
     }  
 }
 
@@ -171,31 +156,35 @@ if($offset=='')
 	$r = mysqli_query($mysqli, $q);
 	if ($r){}	
 	
-	//Insert web version link
-	if(strpos($html, '</webversion>')==true)
+	//If links tracking is enabled, insert links into database
+	if($links_tracking)
 	{
-		mysqli_query($mysqli, 'INSERT INTO links (campaign_id, link) VALUES ('.$campaign_id.', "'.get_app_info('path').'/w/'.short($campaign_id).'")');
-	}
-	
-	//Insert into links
-	$links = array();
-	//extract all links from HTML
-	preg_match_all('/href=["\']([^"\']+)["\']/i', $html, $matches, PREG_PATTERN_ORDER);
-	$matches = array_unique($matches[1]);
-	foreach($matches as $var)
-	{    
-		$var = $query_string!='' ? ((strpos($var,'?') !== false) ? $var.'&'.$query_string : $var.'?'.$query_string) : $var;
-		if(substr($var, 0, 1)!="#" && substr($var, 0, 6)!="mailto" && substr($var, 0, 3)!="tel" && substr($var, 0, 3)!="sms" && substr($var, 0, 13)!="[unsubscribe]" && substr($var, 0, 12)!="[webversion]" && !strpos($var, 'fonts.googleapis.com'))
+		//Insert web version link
+		if(strpos($html, '</webversion>')==true)
 		{
-	    	array_push($links, $var);
-	    }
-	}
-	//extract unique links
-	for($i=0;$i<count($links);$i++)
-	{
-	    $q = 'INSERT INTO links (campaign_id, link) VALUES ('.$campaign_id.', "'.$links[$i].'")';
-	    $r = mysqli_query($mysqli, $q);
-	    if ($r){}
+			mysqli_query($mysqli, 'INSERT INTO links (campaign_id, link) VALUES ('.$campaign_id.', "'.get_app_info('path').'/w/'.short($campaign_id).'")');
+		}
+	
+		//Insert into links
+		$links = array();
+		//extract all links from HTML
+		preg_match_all('/href=["\']([^"\']+)["\']/i', $html, $matches, PREG_PATTERN_ORDER);
+		$matches = array_unique($matches[1]);
+		foreach($matches as $var)
+		{    
+			$var = $query_string!='' ? ((strpos($var,'?') !== false) ? $var.'&'.$query_string : $var.'?'.$query_string) : $var;
+			if(substr($var, 0, 1)!="#" && substr($var, 0, 6)!="mailto" && substr($var, 0, 3)!="tel" && substr($var, 0, 3)!="sms" && substr($var, 0, 13)!="[unsubscribe]" && substr($var, 0, 12)!="[webversion]" && !strpos($var, 'fonts.googleapis.com'))
+			{
+		    	array_push($links, $var);
+		    }
+		}
+		//extract unique links
+		for($i=0;$i<count($links);$i++)
+		{
+		    $q = 'INSERT INTO links (campaign_id, link) VALUES ('.$campaign_id.', "'.$links[$i].'")';
+		    $r = mysqli_query($mysqli, $q);
+		    if ($r){}
+		}
 	}
 	
 	//Get and update number of recipients to send to
@@ -254,12 +243,16 @@ if ($r && mysqli_num_rows($r) > 0)
 		    	}
 		    	else $link = $row2['link'];
 				
-				//replace new links on HTML code
-		    	$html_treated = str_replace('href="'.$link.'"', 'href="'.get_app_info('path').'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id).'"', $html_treated);
-		    	$html_treated = str_replace('href=\''.$link.'\'', 'href="'.get_app_info('path').'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id).'"', $html_treated);
-		    	
-		    	//replace new links on Plain Text code
-		    	$plain_treated = str_replace($link, get_app_info('path').'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id), $plain_treated);
+				//If link tracking is enabled, replace links with trackable links
+				if($links_tracking)
+				{
+					//replace new links on HTML code
+			    	$html_treated = str_replace('href="'.$link.'"', 'href="'.get_app_info('path').'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id).'"', $html_treated);
+			    	$html_treated = str_replace('href=\''.$link.'\'', 'href="'.get_app_info('path').'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id).'"', $html_treated);
+			    	
+			    	//replace new links on Plain Text code
+			    	$plain_treated = str_replace($link, get_app_info('path').'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id), $plain_treated);
+			    }
 		    }  
 		}
 		
@@ -267,6 +260,9 @@ if ($r && mysqli_num_rows($r) > 0)
 		preg_match_all('/\[([a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+),\s*fallback=/i', $title_treated, $matches_var, PREG_PATTERN_ORDER);
 		preg_match_all('/,\s*fallback=([a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*)\]/i', $title_treated, $matches_val, PREG_PATTERN_ORDER);
 		preg_match_all('/(\[[a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+,\s*fallback=[a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*\])/i', $title_treated, $matches_all, PREG_PATTERN_ORDER);
+		preg_match_all('/\[([^\]]+),\s*fallback=/i', $title_treated, $matches_var, PREG_PATTERN_ORDER);
+		preg_match_all('/,\s*fallback=([^\]]*)\]/i', $title_treated, $matches_val, PREG_PATTERN_ORDER);
+		preg_match_all('/(\[[^\]]+,\s*fallback=[^\]]*\])/i', $title_treated, $matches_all, PREG_PATTERN_ORDER);
 		$matches_var = $matches_var[1];
 		$matches_val = $matches_val[1];
 		$matches_all = $matches_all[1];
@@ -338,6 +334,9 @@ if ($r && mysqli_num_rows($r) > 0)
 		preg_match_all('/\[([a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+),\s*fallback=/i', $html_treated, $matches_var, PREG_PATTERN_ORDER);
 		preg_match_all('/,\s*fallback=([a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*)\]/i', $html_treated, $matches_val, PREG_PATTERN_ORDER);
 		preg_match_all('/(\[[a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+,\s*fallback=[a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*\])/i', $html_treated, $matches_all, PREG_PATTERN_ORDER);
+		preg_match_all('/\[([^\]]+),\s*fallback=/i', $html_treated, $matches_var, PREG_PATTERN_ORDER);
+		preg_match_all('/,\s*fallback=([^\]]*)\]/i', $html_treated, $matches_val, PREG_PATTERN_ORDER);
+		preg_match_all('/(\[[^\]]+,\s*fallback=[^\]]*\])/i', $html_treated, $matches_all, PREG_PATTERN_ORDER);
 		$matches_var = $matches_var[1];
 		$matches_val = $matches_val[1];
 		$matches_all = $matches_all[1];
@@ -408,6 +407,9 @@ if ($r && mysqli_num_rows($r) > 0)
 		preg_match_all('/\[([a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+),\s*fallback=/i', $plain_treated, $matches_var, PREG_PATTERN_ORDER);
 		preg_match_all('/,\s*fallback=([a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*)\]/i', $plain_treated, $matches_val, PREG_PATTERN_ORDER);
 		preg_match_all('/(\[[a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+,\s*fallback=[a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*\])/i', $plain_treated, $matches_all, PREG_PATTERN_ORDER);
+		preg_match_all('/\[([^\]]+),\s*fallback=/i', $plain_treated, $matches_var, PREG_PATTERN_ORDER);
+		preg_match_all('/,\s*fallback=([^\]]*)\]/i', $plain_treated, $matches_val, PREG_PATTERN_ORDER);
+		preg_match_all('/(\[[^\]]+,\s*fallback=[^\]]*\])/i', $plain_treated, $matches_all, PREG_PATTERN_ORDER);
 		$matches_var = $matches_var[1];
 		$matches_val = $matches_val[1];
 		$matches_all = $matches_all[1];
@@ -493,7 +495,7 @@ if ($r && mysqli_num_rows($r) > 0)
 		$title_treated = str_replace('[Email]', $email, $title_treated);
     	
     	//convert date tags
-		if($timezone!='') date_default_timezone_set($timezone);
+		date_default_timezone_set($timezone!='' ? $timezone : $user_timezone);
 		$today = time();
 		$currentdaynumber = strftime('%d', $today);
 		$currentday = strftime('%A', $today);
@@ -506,8 +508,12 @@ if ($r && mysqli_num_rows($r) > 0)
 		$plain_treated = str_replace($unconverted_date, $converted_date, $plain_treated);
 		$title_treated = str_replace($unconverted_date, $converted_date, $title_treated);
     	
-    	//add tracking 1 by 1px image
-		$html_treated .= '<img src="'.get_app_info('path').'/t/'.short($campaign_id).'/'.short($subscriber_id).'" alt=""/>';
+    	//If opens tracking is enabled, add 1 x 1 px tracking image
+    	if($opens_tracking)
+    	{
+	    	//add tracking 1 by 1px image
+			$html_treated .= '<img src="'.get_app_info('path').'/t/'.short($campaign_id).'/'.short($subscriber_id).'" alt="" style="width:1px;height:1px;"/>';
+		}
 		
 		//send email
 		$mail = new PHPMailer();
@@ -537,7 +543,8 @@ if ($r && mysqli_num_rows($r) > 0)
 		$mail->FromName   = $from_name;
 		$mail->Subject = $title_treated;
 		$mail->AltBody = $plain_treated;
-		$mail->MsgHTML($html_treated);
+		$mail->Body = $html_treated;
+		$mail->IsHTML(true);
 		$mail->AddAddress($email, $name);
 		$mail->AddReplyTo($reply_to, $from_name);
 		$mail->AddCustomHeader('List-Unsubscribe: <'.APP_PATH.'/unsubscribe/'.short($email).'/'.short($subscriber_list).'/'.short($campaign_id).'>');
@@ -678,6 +685,9 @@ if($no_of_recipients >= $to_send)
 	preg_match_all('/\[([a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+),\s*fallback=/i', $title, $matches_var, PREG_PATTERN_ORDER);
 	preg_match_all('/,\s*fallback=([a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*)\]/i', $title, $matches_val, PREG_PATTERN_ORDER);
 	preg_match_all('/(\[[a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+,\s*fallback=[a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*\])/i', $title, $matches_all, PREG_PATTERN_ORDER);
+	preg_match_all('/\[([^\]]+),\s*fallback=/i', $title, $matches_var, PREG_PATTERN_ORDER);
+	preg_match_all('/,\s*fallback=([^\]]*)\]/i', $title, $matches_val, PREG_PATTERN_ORDER);
+	preg_match_all('/(\[[^\]]+,\s*fallback=[^\]]*\])/i', $title, $matches_all, PREG_PATTERN_ORDER);
 	$matches_var = $matches_var[1];
 	$matches_val = $matches_val[1];
 	$matches_all = $matches_all[1];
@@ -787,10 +797,14 @@ if($no_of_recipients >= $to_send)
 	$mail2->FromName   = $from_name;
 	$mail2->Subject = $title_to_me;
 	$mail2->AltBody = $message_to_me_plain;
-	$mail2->MsgHTML($message_to_me_html);
+	$mail2->Body = $message_to_me_html;
+	$mail2->IsHTML(true);
 	$mail2->AddAddress($from_email, $from_name); //send email to brand account owner
 	$mail2->AddBCC($my_email, $my_name); //send email to main account owner
 	$mail2->Send();	
+	
+	//Zapier Trigger 'new_user_subscribed' event
+	zapier_trigger_new_campaign_sent($title_treated, $from_name, $from_email, $reply_to, strftime("%a, %b %d, %Y, %I:%M%p", time()), APP_PATH.'/w/'.short($campaign_id), $app);
 	
 	//quit
 	exit;

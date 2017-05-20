@@ -5,11 +5,6 @@
 <?php include('includes/create/timezone.php');?>
 
 <?php
-/*echo date('Y-m-d H:i:s');
-exit;*/
-?>
-
-<?php
 	if(get_app_info('is_sub_user')) 
 	{
 		if(get_app_info('app')!=get_app_info('restricted_to_app'))
@@ -18,6 +13,9 @@ exit;*/
 			exit;
 		}
 	}
+	
+	//Check if user is using Amazon SES to send emails
+	$aws_keys_available = get_app_info('s3_key')!='' && get_app_info('s3_secret')!='' ? 'true' : 'false';
 ?>
 
 <?php include('js/create/main.php');?>
@@ -42,6 +40,11 @@ exit;*/
 		  <strong><?php echo _('Sorry, unable to send. Please try again later!');?></strong>
 		</div>
 		
+		<div class="alert alert-error" id="test-send-error2" style="display:none;">
+		  <button class="close" onclick="$('.alert-error').hide();">×</button>
+		  <p id="test-send-error2-msg"></p>
+		</div>
+		
 		<?php
 			//IDs
 			$cid = isset($_GET['c']) && is_numeric($_GET['c']) ? mysqli_real_escape_string($mysqli, $_GET['c']) : exit;
@@ -62,7 +65,7 @@ exit;*/
 	    	$timezone = get_app_info('timezone');
 	    	
 	    	//get scheduled settings
-		    $q = 'SELECT send_date, timezone, from_email, bounce_setup, complaint_setup FROM campaigns WHERE id = '.$cid;
+		    $q = 'SELECT send_date, timezone, from_email FROM campaigns WHERE id = '.$cid;
   			$r = mysqli_query($mysqli, $q);
   			if ($r)
   			{
@@ -82,8 +85,6 @@ exit;*/
 		    		$minute = strftime("%M", $send_date);
 		    		$ampm = strtolower(strftime("%p", $send_date));
 		    		$the_date = $month.'-'.$day.'-'.$year;
-		    		$bounce_setup = $row['bounce_setup'];
-		    		$complaint_setup = $row['complaint_setup'];
   					
   					if($send_date=='')
   					{
@@ -100,26 +101,45 @@ exit;*/
   			    }  
   			}
   			
+  			//Check if 'ONLY_FULL_GROUP_BY' is present in @@sql_mode
+			$q = 'select @@sql_mode';
+			$r = mysqli_query($mysqli, $q);
+			if ($r) while($row = mysqli_fetch_array($r)) $sql_mode = $row['@@sql_mode'];
+			$only_full_group_by = strpos($sql_mode, 'ONLY_FULL_GROUP_BY') !== false ? true : false;
+			if($only_full_group_by)
+			{
+				//ONLY_FULL_GROUP_BY is enabled in sql_mode, campaign cannot be send until 'ONLY_FULL_GROUP_BY' is removed from sql_mode
+				echo '<div class="alert alert-danger">
+						<p><strong>'._('Please disable \'ONLY_FULL_GROUP_BY\' from \'sql_mode\'').'</strong></p>
+						<p>'._('We have detected that \'ONLY_FULL_GROUP_BY\' is enabled in \'sql_mode\' in your MySQL server. Your campaign will fail to send unless \'ONLY_FULL_GROUP_BY\' is removed from \'sql_mode\'. Here\'s how to fix this &rarr; ').'<a href="https://sendy.co/troubleshooting#ubuntu-campaign-sent-to-0-recipients-and-or-autoresponders-not-sending" target="_blank">https://sendy.co/troubleshooting#ubuntu-campaign-sent-to-0-recipients-and-or-autoresponders-not-sending</a></p>
+						<p>Once done, refresh this page and this error message should disappear.</p>
+					</div>
+					<script type="text/javascript">
+						$(document).ready(function() {
+							$("#real-btn").addClass("disabled");
+							$("#test-send-btn").addClass("disabled");
+							$("#schedule-btn").addClass("disabled");
+							$("#real-btn").attr("disabled", "disabled");
+							$("#test-send-btn").attr("disabled", "disabled");
+							$("#schedule-btn").attr("disabled", "disabled");
+							$("#email_list").attr("disabled", "disabled");
+						});
+					</script>';
+			}
+  			
   			//Check if from email is verified in SES console
   			if(!get_app_info('is_sub_user') && get_app_info('s3_key')!='' && get_app_info('s3_secret')!='')
   			{
 	  			require_once('includes/helpers/ses.php');
 				$ses = new SimpleEmailService(get_app_info('s3_key'), get_app_info('s3_secret'), get_app_info('ses_endpoint'));
 				$v_addresses = $ses->ListIdentities();
-				$verifiedEmailsArray = array();
-				$verifiedDomainsArray = array();
-				foreach($v_addresses['Addresses'] as $val){
-					$validator = new EmailAddressValidator;
-					if ($validator->check_email_address($val)) array_push($verifiedEmailsArray, $val);
-					else array_push($verifiedDomainsArray, $val);
-				}
-				if(!in_array($from_email, $verifiedEmailsArray) && !in_array($from_email_domain, $verifiedDomainsArray))
+				
+				if(!$v_addresses)
 				{
-					//From email address or domain is not verified in SES console
-					echo '
-						<div class="alert alert-danger">
-							<p><strong>'._('Unverified \'From email\'').': '.$from_email.'</strong></p>
-							<p>'._('Your \'From email\', (or its domain) is either not verified in your Amazon SES console or it is not verified in the same region as what is set in your main Settings. Please follow very closely Step 6 of our Get Started Guide').' <a href="https://sendy.co/get-started" target="_blank">https://sendy.co/get-started</a></p>
+					//Unable to commuincate with Amazon SES API
+					echo '<div class="alert alert-danger">
+							<p><strong>'._('Unable to communicate with Amazon SES API').'</strong></p>
+							<p>'._('Visit your "Brands" page by clicking your company\'s name at the top left of the screen. Then check the instructions on the left sidebar on how to resolve this issue').'</p>
 						</div>
 						<script type="text/javascript">
 							$(document).ready(function() {
@@ -131,15 +151,73 @@ exit;*/
 								$("#schedule-btn").attr("disabled", "disabled");
 								$("#email_list").attr("disabled", "disabled");
 							});
-						</script>
-					';
+						</script>';
 				}
 				else
 				{
-					//Set email feedback forwarding to false
-					$ses = new SimpleEmailService(get_app_info('s3_key'), get_app_info('s3_secret'), get_app_info('ses_endpoint'));
-					$ses->setIdentityFeedbackForwardingEnabled($from_email, 'false');
-					$ses->setIdentityFeedbackForwardingEnabled($from_email_domain, 'false');
+					$verifiedEmailsArray = array();
+					$verifiedDomainsArray = array();
+					foreach($v_addresses['Addresses'] as $val){
+						$validator = new EmailAddressValidator;
+						if ($validator->check_email_address($val)) array_push($verifiedEmailsArray, $val);
+						else array_push($verifiedDomainsArray, $val);
+					}
+					
+					$veriStatus = true;
+					$getIdentityVerificationAttributes = $ses->getIdentityVerificationAttributes($from_email);
+					foreach($getIdentityVerificationAttributes['VerificationStatus'] as $getIdentityVerificationAttribute) 
+						if($getIdentityVerificationAttribute=='Pending') $veriStatus = false;
+					
+					//$from_email_verification_status = $getIdentityVerificationAttributes['VerificationStatus'];
+					
+					if(!in_array($from_email, $verifiedEmailsArray) && !in_array($from_email_domain, $verifiedDomainsArray))
+					{
+						//Attempt to verify the email address, a verification email will be sent to the 'From email' address by Amazon SES
+						$ses->verifyEmailAddress($from_email);
+						
+						//From email address or domain is not verified in SES console
+						echo '<div class="alert alert-danger">
+								<p><strong>'._('Unverified \'From email\'').': '.$from_email.'</strong></p>
+								<p>'._('Your \'From email\' or its domain is not verified in your Amazon SES console. We have just sent your \'From email\' address to Amazon SES for verification. An email from Amazon is sent to your \'From email\' address with a confirmation link to complete the verification. Click the link to complete the verification, then refresh this page.').'</p>
+							</div>
+							<script type="text/javascript">
+								$(document).ready(function() {
+									$("#real-btn").addClass("disabled");
+									$("#test-send-btn").addClass("disabled");
+									$("#schedule-btn").addClass("disabled");
+									$("#real-btn").attr("disabled", "disabled");
+									$("#test-send-btn").attr("disabled", "disabled");
+									$("#schedule-btn").attr("disabled", "disabled");
+									$("#email_list").attr("disabled", "disabled");
+								});
+							</script>';
+					}
+					else if(!$veriStatus)
+					{
+						echo '
+							<div class="alert alert-danger">
+								<p><strong>\''.$from_email.'\' '._('or').' \''.$from_email_domain.'\' '._('is pending verification in your Amazon SES console').'</strong></p>
+								<p>'._('Your \'From email\' or its domain is pending verification in your Amazon SES console. Please complete the verification then refresh this page to proceed.').'</p>
+							</div>
+							<script type="text/javascript">
+								$(document).ready(function() {
+									$("#real-btn").addClass("disabled");
+									$("#test-send-btn").addClass("disabled");
+									$("#schedule-btn").addClass("disabled");
+									$("#real-btn").attr("disabled", "disabled");
+									$("#test-send-btn").attr("disabled", "disabled");
+									$("#schedule-btn").attr("disabled", "disabled");
+									$("#email_list").attr("disabled", "disabled");
+								});
+							</script>';
+					}
+					else
+					{
+						//Set email feedback forwarding to false
+						$ses = new SimpleEmailService(get_app_info('s3_key'), get_app_info('s3_secret'), get_app_info('ses_endpoint'));
+						$ses->setIdentityFeedbackForwardingEnabled($from_email, 'false');
+						$ses->setIdentityFeedbackForwardingEnabled($from_email_domain, 'false');
+					}
 				}
 			}			
 	    ?>
@@ -207,13 +285,13 @@ exit;*/
               </select>
             </div>
           </div>
-		  
+
 		  <!-- Exclude Lists Options -->
 		  <div class="control-group">
             <label class="control-label" for="multiSelectExclude"><?php echo _('Exclude email list(s)');?></label>
             <div class="controls">
               <select multiple="multiple" id="email_list_exclude" name="email_list_exclude[]" style="height:200px">
-              	<?php 
+              	<?php
 	              	$q = 'SELECT * FROM lists WHERE app = '.get_app_info('app').' AND userID = '.get_app_info('main_userID').' ORDER BY name ASC';
 	              	$r = mysqli_query($mysqli, $q);
 	              	if ($r && mysqli_num_rows($r) > 0)
@@ -223,7 +301,7 @@ exit;*/
 	              			$list_id = stripslashes($row['id']);
 	              			$list_name = stripslashes($row['name']);
 	              			$list_selected = '';
-	              			
+
 	              			$q2 = 'SELECT lists, exclude_lists FROM campaigns WHERE id = '.$cid;
 	              			$r2 = mysqli_query($mysqli, $q2);
 	              			if ($r2)
@@ -234,11 +312,11 @@ exit;*/
 	              					$lists_array = explode(',', $lists);
 	              					if(in_array($list_id, $lists_array))
 	              						$list_selected = 'selected';
-	              			    }  
+	              			    }
 	              			}
-	              			
+
 	              			echo '<option value="'.$list_id.'" data-quantity="'.get_list_quantity($list_id).'" id="'.$list_id.'" '.$list_selected.'>'.$list_name.'</option>';
-	              	    }  
+	              	    }
 	              	}
 	              	else
 	              	{
@@ -249,7 +327,7 @@ exit;*/
             </div>
           </div>
 		  <!-- Exclude Lists Options -->
-		  
+
 	        <input type="hidden" name="cid" value="<?php echo $cid;?>">
 	        <input type="hidden" name="uid" value="<?php echo $aid;?>">
 	        <input type="hidden" name="path" value="<?php echo get_app_info('path');?>">
@@ -257,11 +335,7 @@ exit;*/
 	        <input type="hidden" name="cron" value="<?php echo $cron;?>">
 	        <input type="hidden" name="total_recipients" id="total_recipients">
 	        
-	        <?php
-	        	//Check if user is using Amazon SES to send emails
-				if(get_app_info('s3_key')!='' && get_app_info('s3_secret')!='') $aws_keys_available = 'true';
-				else $aws_keys_available = 'false';
-				
+	        <?php				
 	        	//Get SES quota (array)
 	        	if($aws_keys_available=='true')
 	        	{
@@ -281,53 +355,56 @@ exit;*/
 	        	//Get limits (SES or brand limits) depending if user is a main or sub user
 				if(get_app_info('is_sub_user'))
 				{
+					$allocated_quota = get_app_data('allocated_quota');
+					$day_of_reset = get_app_data('day_of_reset');
+					$month_of_next_reset = get_app_data('month_of_next_reset');
+					$year_of_next_reset = get_app_data('year_of_next_reset');
+					
 		        	//Brand limits
 					$today_unix_timestamp = time();
-					$brand_monthly_quota = get_app_data('allocated_quota');
+					$brand_monthly_quota = $allocated_quota;
 					if($brand_monthly_quota!=-1)
 					{
 						//Check if limit needs to be reset					
 						$day_today = strftime("%e", $today_unix_timestamp);
 						$month_today = strftime("%b", $today_unix_timestamp);
 						$year_today = strftime("%G", $today_unix_timestamp);
+						
+						//Find the number of the last day of this month
 						$no_of_days_this_month = cal_days_in_month(CAL_GREGORIAN, strftime("%m", $today_unix_timestamp), $year_today);
 						
-						$brand_limit_resets_on = get_app_data('day_of_reset')>$no_of_days_this_month ? $no_of_days_this_month : get_app_data('day_of_reset');
-						$brand_month_of_next_reset = get_app_data('month_of_next_reset');
+						$brand_limit_resets_on = $day_of_reset>$no_of_days_this_month ? $no_of_days_this_month : $day_of_reset;
 						
-						$date_today_unix = strtotime($day_today.' '.$month_today);
-						$date_on_reset_unix = strtotime($brand_limit_resets_on.' '.$brand_month_of_next_reset);
+						//Get UNIX timestamp of 'date today' and 'date of next reset' for comparison
+						$date_today_unix = strtotime($day_today.' '.$month_today.' '.$year_today);
+						$date_on_reset_unix = strtotime($brand_limit_resets_on.' '.$month_of_next_reset.' '.$year_of_next_reset);
 						
 						//If date of reset has already passed today's date, reset current limit to 0
 						if($date_today_unix>=$date_on_reset_unix)
 						{
-							//If the day of reset hasn't passed today's 'day', month_of_next_reset should be this month
-							if($brand_limit_resets_on>$day_today)
-							{
-								$month_next = $month_today;
-							}
-							//Otherwise, add one month to today's month as month_of_next_reset should be next month
-							else
-							{
-								$month_next = strtotime('1 '.$month_today.' +1 month');
-								$month_next = strftime("%b", $month_next);
-							}
+							//If today's 'day' is passed 'day_of_reset', +1 month for next reset's month
+							if($day_today >= $brand_limit_resets_on) $plus_one_month = '+1 month';
+							
+							//Prepare day, month and year of next reset
+							$month_next_unix = strtotime('1 '.$month_today.' '.$year_today.' '.$plus_one_month);
+							$month_next = strftime("%b", $month_next_unix);
+							$year_next = strftime("%G", $month_next_unix);
 							
 							//Reset current limit to 0 and set the month_of_next_reset to the next month
-							$q = 'UPDATE apps SET current_quota = 0, month_of_next_reset = "'.$month_next.'" WHERE id = '.get_app_info('app');
+							$q = 'UPDATE apps SET current_quota = 0, month_of_next_reset = "'.$month_next.'", year_of_next_reset = "'.$year_next.'" WHERE id = '.get_app_info('app');
 							$r = mysqli_query($mysqli, $q);
 							if($r) 
 							{
-								//Update new $brand_month_of_next_reset
-								$brand_month_of_next_reset = $month_next;
+								//Update new $month_of_next_reset
+								$month_of_next_reset = $month_next;
 							}
 						}
 						
 						//Calculate day of reset for next month
-						$month_next = strtotime('1 '.$brand_month_of_next_reset);
+						$month_next = strtotime('1 '.$month_of_next_reset);
 						$month_next = strftime("%m", $month_next);
 						$no_of_days_next_month = cal_days_in_month(CAL_GREGORIAN, $month_next, $year_today);
-						$brand_limit_resets_on = get_app_data('day_of_reset')>$no_of_days_next_month ? $no_of_days_next_month : get_app_data('day_of_reset');
+						$brand_limit_resets_on = $day_of_reset>$no_of_days_next_month ? $no_of_days_next_month : $day_of_reset;
 						
 						//Get sends left
 						$brand_current_quota = get_app_data('current_quota');
@@ -350,7 +427,7 @@ exit;*/
 	        	
 		        <?php if(paid()):?>
 		        
-			        <?php if($brand_monthly_quota!=-1):?><strong><?php echo _('Monthly limit');?></strong>: <?php echo $brand_monthly_quota.' ('._('resets on').' '.$brand_month_of_next_reset.' '.$brand_limit_resets_on;?>)<br/><?php endif;?>
+			        <?php if($brand_monthly_quota!=-1):?><strong><?php echo _('Monthly limit');?></strong>: <?php echo $brand_monthly_quota.' ('._('resets on').' '.$month_of_next_reset.' '.$brand_limit_resets_on;?>)<br/><?php endif;?>
 		        	<strong><?php echo _('Recipients');?></strong>: <span id="recipients">0</span> 
 		        	<?php if($brand_monthly_quota!=-1) echo _('of').' '.$brand_sends_left._(' remaining')?><br/><br/>
 		        	
@@ -379,7 +456,7 @@ exit;*/
 		        <?php else:?>
 			        <input type="hidden" name="paypal" value="<?php echo get_paypal();?>">
 			        <div class="well" style="width:260px;">
-			        	<?php if($brand_monthly_quota!=-1):?><strong><?php echo _('Monthly limit');?></strong>: <?php echo $brand_monthly_quota.' ('._('resets on').' '.$brand_month_of_next_reset.' '.$brand_limit_resets_on;?>)<br/><?php endif;?>
+			        	<?php if($brand_monthly_quota!=-1):?><strong><?php echo _('Monthly limit');?></strong>: <?php echo $brand_monthly_quota.' ('._('resets on').' '.$month_of_next_reset.' '.$brand_limit_resets_on;?>)<br/><?php endif;?>
 				        <strong><?php echo _('Recipients');?></strong>: <span id="recipients">0</span> 
 				        <?php if($brand_monthly_quota!=-1) echo _('of').' '.$brand_sends_left._(' remaining')?><br/>
 				        <strong><?php echo _('Delivery Fee');?></strong>: <?php echo get_fee('currency');?> <span id="delivery_fee"><?php echo get_fee('delivery_fee');?></span><br/>
@@ -389,7 +466,7 @@ exit;*/
 			        
 			        <!-- over limit msg -->
 			    	<div class="alert alert-error" id="over-limit" style="display:none;">
-					  <?php echo _('You can\'t send more than your monthly limit. Request for your limit to be raised by sending an email to').' <a href="mailto:'.get_app_info('email').'">'.get_app_info('email').'</a>';?> 
+					  <?php echo _('You can\'t send more than your monthly limit. Request for your limit to be raised by sending an email to').' <a href="mailto:'.$main_user_email.'">'.$main_user_email.'</a>.';?> 
 					</div>
 			    	<!-- /over limit msg -->
 			        
@@ -410,11 +487,143 @@ exit;*/
 		    	<strong><?php echo _('SES sends left');?></strong>: <span id="sends_left"><?php echo $ses_sends_left.' of '.$ses_quota;?></span><br/>
 		    	
 			    	<?php if($ses_sends_left==0 && $ses_quota==0):?>
-			    	<br/><p class="alert alert-danger"><?php echo _('Unable to get your SES quota from Amazon. You won\'t be able to send emails as well. Verify that your AWS credentials are correct. If you\'re certain they\'re correct and are still seeing zeros in your quota, your server clock is out of sync. To fix this, Amazon requires you to <strong>sync your server clock with NTP</strong>. Request your host to do so if you\'re unsure.');?></p>
+			    	<br/><p class="alert alert-danger"><?php echo _('Unable to get your SES quota from Amazon. Visit your "Brands" page by clicking your company\'s name at the top left of the screen. Then check the instructions on the left sidebar on how to resolve this issue');?></p>
 			    	<?php endif;?>
 		    	
 		    	<?php endif;?>
 		    	<br/>
+		    	
+		    	<?php 	
+			    	if($aws_keys_available=='true')
+			    	{				    						
+						//Check bounces & complaints handling setup
+						require_once('includes/helpers/sns.php');
+						$aws_endpoint_array = explode('.', get_app_info('ses_endpoint'));
+						$aws_endpoint = $aws_endpoint_array[1];
+						$sns = new AmazonSNS(get_app_info('s3_key'), get_app_info('s3_secret'), $aws_endpoint);
+						$bounces_topic_arn = '';
+						$bounces_subscription_arn = '';
+						$complaints_topic_arn = '';
+						$complaints_subscription_arn = '';
+						//Get protocol of endpoint
+					    $protocol_array = explode(':', get_app_info('path'));
+					    $protocol = $protocol_array[0];
+						try 
+						{
+							//Get list of SNS topics and subscriptions
+							$v_subscriptions = $sns->ListSubscriptions();
+							foreach ($v_subscriptions as $subscription)
+							{
+								$TopicArn = $subscription['TopicArn'];
+								$Endpoint = $subscription['Endpoint'];
+								if($Endpoint==get_app_info('path').'/includes/campaigns/bounces.php' || $Endpoint==get_app_info('path').'includes/campaigns/bounces.php')
+								{
+									$bounces_topic_arn = $TopicArn;
+									$bounces_subscription_arn = $Endpoint;
+								}
+								if($Endpoint==get_app_info('path').'/includes/campaigns/complaints.php' || $Endpoint==get_app_info('path').'includes/campaigns/complaints.php')
+								{
+									$complaints_topic_arn = $TopicArn;
+									$complaints_subscription_arn = $Endpoint;
+								}
+							}
+							
+							//Create 'bounces' SNS topic
+						    try {$bounces_topic_arn = $sns->CreateTopic('bounces');}
+							catch (SNSException $e) {echo '<p class="error">'._('Error').' ($sns->CreateTopic(\'bounces\')): '.$e->getMessage().'. '._('Please try again by refreshing this page. If this error persist, visit your Amazon SNS console and delete all \'Topics\' and \'Subscriptions\' and try again.')."<br/><br/></p>";}
+							
+							//Create 'complaints' SNS topic
+							try {$complaints_topic_arn = $sns->CreateTopic('complaints');}
+							catch (SNSException $e) {echo '<p class="error">'._('Error').' ($sns->CreateTopic(\'complaints\')): '.$e->getMessage().'. '._('Please try again by refreshing this page. If this error persist, visit your Amazon SNS console and delete all \'Topics\' and \'Subscriptions\' and try again.')."<br/><br/></p>";}
+						    
+						    //If 'bounces' and 'complaints' SNS topics exists, create SNS subscriptions for them
+						    if($bounces_topic_arn!='' && $complaints_topic_arn!='')
+						    {
+							    //Create 'bounces' SNS subscription
+								try {$bounces_subscribe_endpoint = $sns->Subscribe($bounces_topic_arn, $protocol, get_app_info('path').'/includes/campaigns/bounces.php');}
+								catch (SNSException $e) {echo '<p class="error">'._('Error').' ($sns->Subscribe(\'bounces\')): '.$e->getMessage().'. '._('Please try again by refreshing this page. If this error persist, visit your Amazon SNS console and delete all \'Topics\' and \'Subscriptions\' and try again.')."<br/><br/></p>";}
+								
+								//Create 'complaints' SNS subscription
+								try {$complaints_subscribe_endpoint = $sns->Subscribe($complaints_topic_arn, $protocol, get_app_info('path').'/includes/campaigns/complaints.php');}
+								catch (SNSException $e) {echo '<p class="error">'._('Error').' ($sns->Subscribe(\'complaints\')): '.$e->getMessage().'. '._('Please try again by refreshing this page. If this error persist, visit your Amazon SNS console and delete all \'Topics\' and \'Subscriptions\' and try again.')."<br/><br/></p>";}
+						    }
+						    else echo '<p class="error">'._('Error: Unable to create bounces and complaints SNS topics, please try again by refreshing this page.')."<br/><br/></p>";
+						    
+						    //Set SNS 'Notifications' for 'From email'
+					        require_once('includes/helpers/ses.php');
+							$ses = new SimpleEmailService(get_app_info('s3_key'), get_app_info('s3_secret'), get_app_info('ses_endpoint'));
+							
+							//Set 'bounces' Notification
+							$ses->SetIdentityNotificationTopic($from_email,$bounces_topic_arn,'Bounce');
+							$ses->SetIdentityNotificationTopic($from_email_domain,$bounces_topic_arn,'Bounce');
+							
+							//Set 'complaints' Notification
+							$ses->SetIdentityNotificationTopic($from_email,$complaints_topic_arn,'Complaint');
+							$ses->SetIdentityNotificationTopic($from_email_domain,$complaints_topic_arn,'Complaint');
+							
+							//Disable email feedback forwarding
+							$ses->setIdentityFeedbackForwardingEnabled($from_email, 'false');
+							$ses->setIdentityFeedbackForwardingEnabled($from_email_domain, 'false');
+	
+						} 
+						catch (Exception $e) 
+						{
+							echo '
+							<script type="text/javascript">
+								$(document).ready(function() {
+									$("#real-btn").addClass("disabled");
+									$("#test-send-btn").addClass("disabled");
+									$("#schedule-btn").addClass("disabled");
+									$("#real-btn").attr("disabled", "disabled");
+									$("#test-send-btn").attr("disabled", "disabled");
+									$("#schedule-btn").attr("disabled", "disabled");
+									$("#email_list").attr("disabled", "disabled");
+								});
+							</script>
+							';
+							
+							if($e->getMessage()=='AuthorizationError'):
+					
+			    ?>
+			    
+							    <div class="alert alert-danger" id="amazon-sns-access">
+								  <p><?php echo _('Sendy is unable to verify and setup bounces & complaints handling for your \'From email\' address. Here\'s what you need to do: ');?> </p>
+								  <p>
+									  <ol>
+										  <li style="margin-bottom: 10px;">
+										  		<?php echo _('Visit your <a href="https://console.aws.amazon.com/iam/home#/users" target="_blank">IAM console</a> then follow the instructions in <a href="#amazonsnsfullaccess" data-toggle="modal">this video</a>.');?>
+										  </li>
+										  <li><?php echo _('Then refresh this page.');?></li>
+									  </ol>
+								  </p>
+								  <p><?php echo _('Once this is done, Sendy will be able to setup bounces & complaints handling automatically.');?></p>
+								</div>
+								
+								<!-- Video instructions -->
+								<div id="amazonsnsfullaccess" class="modal hide fade">
+								<div class="modal-header">
+								  <button type="button" class="close" data-dismiss="modal">&times;</button>
+								  <h3><i class="icon icon-time" style="margin-top: 5px;"></i> <?php echo _('How to add AmazonSNSFullAccess policy to IAM user ');?></h3>
+								</div>
+								<div class="modal-body">
+								<p><iframe src="https://player.vimeo.com/video/198768239" frameborder="0" webkitallowfullscreen mozallowfullscreen allowfullscreen width="522" height="337"></iframe></p>
+								<p><a href="https://vimeo.com/198768239" target="_blank" style="text-decoration: underline;">Watch this video in a new tab &rarr;</a></p>
+								</div>
+								<div class="modal-footer">
+								  <a href="#" class="btn btn-inverse" data-dismiss="modal"><i class="icon icon-ok-sign"></i> <?php echo _('Okay');?></a>
+								</div>
+								</div>
+								<!-- Video instructions -->
+			    
+			    <?php 		
+				    		else:
+				    		
+					    		echo '<p class="error">'._('Error communicating with Amazon SNS API').': '.$e->getMessage().'</p>';
+				    		
+				    		endif; 
+				    	}
+					}
+				?>
 		    	
 		    	<?php if($aws_keys_available=='true' && $ses_quota==200):?>
 		    	<div class="alert" id="no-production-access">
@@ -503,13 +712,13 @@ exit;*/
 			    <input type="hidden" name="total_recipients2" id="total_recipients2">
 			    <?php endif;?>
 			<?php else:?>
-			<form action="<?php echo get_app_info('path');?>/includes/create/send-later.php" method="POST" accept-charset="utf-8" id="schedule-form">
+				<form action="<?php echo get_app_info('path');?>/includes/create/send-later.php" method="POST" accept-charset="utf-8" id="schedule-form">
 				<input type="hidden" name="total_recipients2" id="total_recipients2">
 		    <?php endif;?>
 		    	<h3><i class="icon-ok icon-time" style="margin-top:5px;"></i> <?php echo _('Schedule this campaign');?></h3><br/>
 	    		<input type="hidden" name="campaign_id" value="<?php echo $cid;?>"/>
-	    		<input type="hidden" name="email_lists" id="email_lists"/>				
-	    		<input type="hidden" name="email_lists_exclude" id="email_lists_exclude"/>	<?php /* Adding field for sending through exclude list. */ ?>
+	    		<input type="hidden" name="email_lists" id="email_lists"/>
+				<input type="hidden" name="email_lists_exclude" id="email_lists_exclude"/>	<?php /* Adding field for sending through exclude list. */ ?>
 	    		<input type="hidden" name="app" value="<?php echo $aid;?>"/>
 	    		
 	    		<label for="send_date"><?php echo _('Pick a date');?></label>
@@ -595,7 +804,71 @@ exit;*/
     	<div>
 	    	<h2><?php echo _('Newsletter preview');?></h2><br/>
 	    	<blockquote><strong><?php echo _('From');?></strong> <span class="label"><?php echo get_saved_data('from_name');?> &lt;<?php echo get_saved_data('from_email');?>&gt;</span></blockquote>
+	    	<?php if(get_saved_data('label')!=''):?>
+		    	<blockquote><strong><?php echo _('Campaign title');?></strong> <span class="label"><?php echo get_saved_data('label');?></span></blockquote>
+	    	<?php endif;?>
 	    	<blockquote><strong><?php echo _('Subject');?></strong> <span class="label"><?php echo get_saved_data('title');?></span></blockquote>
+	    	<blockquote><strong><?php echo _('Opens tracking');?></strong> <?php echo get_saved_data('opens_tracking') ? '<span class="label label-success">Enabled</span>' : '<span class="label">Disabled</span>';?></blockquote>
+	    	<blockquote><strong><?php echo _('Clicks tracking');?></strong> <?php echo get_saved_data('links_tracking') ? '<span class="label label-success">Enabled</span>' : '<span class="label">Disabled</span>';?></blockquote>
+	    	<?php 
+		        if (file_exists('uploads/attachments/'.$cid))
+				{
+					echo '<blockquote><strong>'._('Attachments').'</strong>';
+					if($handle = opendir('uploads/attachments/'.$cid))
+					{
+						$i = -1;
+					    while (false !== ($file = readdir($handle))) 
+					    {
+					    	if($file!='.' && $file!='..'):
+			    ?>
+								<ul id="attachments" style="margin-top: 10px;">
+									<li id="attachment<?php echo $i;?>" style="background: white; padding: 0px;">
+										<?php 
+											$filen = $file;
+											if(strlen($filen)>30) $filen = substr($file, 0, 30).'...';
+											echo $filen;
+										?> 
+										(<?php echo round((filesize('uploads/attachments/'.$cid.'/'.$file)/1000000), 2);?>MB) 
+										<a href="<?php echo get_app_info('path');?>/includes/create/delete-attachment.php" data-filename="<?php echo $file;?>" title="<?php echo _('Delete');?>" id="delete<?php echo $i;?>"><i class="icon icon-trash"></i></a>
+										<script type="text/javascript">
+											$("#delete<?php echo $i?>").click(function(e){
+												e.preventDefault();
+												filename = $(this).data("filename");
+												campaign_id = "<?php echo $cid?>";
+												url = $(this).attr("href");
+												c = confirm('<?php echo _('Confirm delete');?> \"'+filename+'\"?');
+												
+												if(c)
+												{
+													$.post(url, { filename: filename, campaign_id: campaign_id },
+													  function(data) {
+													      if(data)
+													      {
+													      	$("#attachment<?php echo $i?>").fadeOut();
+													      }
+													      else
+													      {
+													      	alert("<?php echo _('Sorry, unable to delete. Please try again later!');?>");
+													      }
+													  }
+													);
+												}
+											});
+										</script>
+									</li>
+								</ul>
+				<?php
+							endif;
+							
+							$i++;
+					    }
+					
+					    closedir($handle);
+					    
+					    echo '</blockquote>';
+					}
+				}
+	        ?>
 	    	<iframe src="<?php echo get_app_info('path');?>/w/<?php echo short($cid);?>?<?php echo time();?>" id="preview-iframe"></iframe>
     	</div>
     </div>
@@ -619,56 +892,11 @@ exit;*/
 			}
 			else
 			{					
-				//Check if bounces and complaints notifications are setup
-				<?php 
-					if(!get_app_info('is_sub_user') && get_app_info('s3_key')!='' && get_app_info('s3_secret')!=''):
-					
-					//Get bounce/complaint setup statuses
-					$q = 'SELECT bounce_setup, complaint_setup FROM apps WHERE from_email = "'.$from_email.'"';
-					$r = mysqli_query($mysqli, $q);
-					if (mysqli_num_rows($r) > 0)
-					{
-					    while($row = mysqli_fetch_array($r))
-					    {
-							$bounce_setup = $row['bounce_setup'];
-							$complaint_setup = $row['complaint_setup'];
-					    }  
-					}
-					
-					//If bounces or complaints have not been setup, send an email to Amazon SES mailbox simulator to confirm this
-					if($bounce_setup==0 || $complaint_setup=0):
-				?>					
-					//Show loading modal window
-					$('#sns-loading').modal('show');
-				
-					$.post("<?php echo get_app_info('path')?>/includes/campaigns/check_sns.php", { from_email: "<?php echo $from_email;?>", aws_key: "<?php echo get_app_info('s3_key')?>", aws_secret: "<?php echo get_app_info('s3_secret')?>", ses_endpoint: "<?php echo get_app_info('ses_endpoint')?>" },
-					  function(data) {
-					      if(data==true) 
-					      {
-					      	$('#please-wait-msg').html("<i class=\"icon icon-ok\"></i> <?php echo _('Congrats! Bounces & complaints have been set up');?>");
-					      	setTimeout(function(){$("#schedule-form").submit()}, 2000);
-					      }
-					      else
-					      {
-					      	$('#sns-warning').modal('show');
-					      	$('#sns-loading').modal('hide');
-					      }
-					  }
-					);
-					<?php else:?>
-					 $("#total_recipients2").val($("#recipients").text());
-					 $("#schedule-form").submit();
-					
-					<?php endif;?>
-					
-				<?php else:?>
-				 $("#total_recipients2").val($("#recipients").text());
-				 $("#schedule-form").submit();
-				
-				<?php endif;?>
+				//Save & schedule the email to be sent later
+				$("#total_recipients2").val($("#recipients").text());
+				$("#schedule-form").submit();
 			}
 		});
-		
 		
 		//send email for real
 		$("#real-form").submit(function(e){
@@ -683,58 +911,12 @@ exit;*/
 			}
 			else
 			{
+				<?php if($_SESSION[$_SESSION['license']] != hash('sha512', $_SESSION['license'].'2ifQ9IppVwYdOgSJoQhKOHAUK/oPwKZy')) :?>
+				if(confirm("Hi! This is Ben, the indie developer of Sendy. Please consider supporting my tireless efforts in developing this software you are using by purchasing a copy of Sendy at sendy.co. I really appreciate your support. Thank you and God bless!")) window.location = "https://sendy.co"; else window.location = "https://sendy.co";
+				<?php else:?>
 				c = confirm("<?php echo addslashes(_('Have you double checked your selected lists? If so, let\'s go ahead and send this!'));?>");
-				
-				if(c)
-				{					
-					//Check if bounces and complaints notifications are setup
-					<?php 
-						if(!get_app_info('is_sub_user') && get_app_info('s3_key')!='' && get_app_info('s3_secret')!=''):
-						
-						//Get bounce/complaint setup statuses
-						$q = 'SELECT bounce_setup, complaint_setup FROM apps WHERE from_email = "'.$from_email.'"';
-						$r = mysqli_query($mysqli, $q);
-						if ($r)
-						{
-						    while($row = mysqli_fetch_array($r))
-						    {
-								$bounce_setup = $row['bounce_setup'];
-								$complaint_setup = $row['complaint_setup'];
-						    }  
-						}
-						
-						//If bounces or complaints have not been setup, send an email to Amazon SES mailbox simulator to confirm this
-						if($bounce_setup==0 || $complaint_setup=0):
-					?>
-						//Show loading modal window
-						$('#sns-loading').modal('show');
-						
-						$.post("<?php echo get_app_info('path')?>/includes/campaigns/check_sns.php", { from_email: "<?php echo $from_email;?>", aws_key: "<?php echo get_app_info('s3_key')?>", aws_secret: "<?php echo get_app_info('s3_secret')?>", ses_endpoint: "<?php echo get_app_info('ses_endpoint')?>" },
-						  function(data) {
-						      if(data==true) 
-						      {
-						      	$('#please-wait-msg').html("<i class=\"icon icon-ok\"></i> <?php echo _('Congrats! Bounces & complaints have been set up');?>");
-						      	setTimeout(send_it, 2000);
-						      }
-						      else 
-						      {
-						      	$('#sns-warning').modal('show');
-						      	$('#sns-loading').modal('hide');
-						      }
-						  }
-						);
-						<?php else:?>
-						
-						send_it();
-						
-						<?php endif;?>
-						
-					<?php else:?>
-					
-					send_it();
-					
-					<?php endif;?>
-				}
+				if(c) send_it();
+				<?php endif;?>
 			}
 		});
 		

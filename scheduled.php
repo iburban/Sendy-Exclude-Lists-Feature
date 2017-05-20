@@ -1,5 +1,6 @@
 <?php ini_set('display_errors', 0);?>
-<?php include('includes/helpers/class.phpmailer.php');?>
+<?php include('includes/helpers/PHPMailerAutoload.php');?>
+<?php include('includes/helpers/integrations/zapier/triggers/functions.php');?>
 <?php 
 	include('includes/config.php');
 	//--------------------------------------------------------------//
@@ -64,7 +65,7 @@
 	$offset = isset($_GET['offset']) ? $_GET['offset'] : '';
 	
 	//Check campaigns database
-	$q = 'SELECT timezone, sent, id, app, userID, to_send, to_send_lists, recipients, timeout_check, send_date, lists, from_name, from_email, reply_to, title, label, plain_text, html_text, query_string, exclude_lists FROM campaigns WHERE (send_date !="" AND lists !="" AND timezone != "") OR (to_send > recipients) ORDER BY sent DESC';
+	$q = 'SELECT timezone, sent, id, app, userID, to_send, to_send_lists, recipients, timeout_check, send_date, lists, from_name, from_email, reply_to, title, label, plain_text, html_text, query_string, opens_tracking, links_tracking, exclude_lists FROM campaigns WHERE (send_date !="" AND lists !="" AND timezone != "") OR (to_send > recipients) ORDER BY sent DESC';
 	$r = mysqli_query($mysqli, $q);
 	if ($r && mysqli_num_rows($r) > 0)
 	{
@@ -72,7 +73,6 @@
 	    {
 	    	//prepare variables
 	    	$timezone = $row['timezone'];
-	    	if($timezone!='0' && $timezone!='') date_default_timezone_set($timezone);
 			$sent = $row['sent'];
 			$campaign_id = $row['id'];
 			$app = $row['app'];
@@ -93,16 +93,20 @@
 			$to_send_num = $row['to_send'];
 			$to_send = $to_send_num;
 			$to_send_lists = $row['to_send_lists'];
-			
-			//fetch exclude_lists
-			$exclude_lists_field = $row['exclude_lists'];
-			$exclude_lists_arr = array();
-			$exclude_lists_not_in_sql = "";
-			if ($exclude_lists_field !== NULL && strlen($exclude_lists_field) > 0)
-			{
-				$exclude_lists_arr = explode(',', $exclude_lists_field);
-				$exclude_lists_not_in_sql = get_exclude_list_user_id_sql(explode(',', $email_list), $exclude_lists_arr);
-			}
+			$opens_tracking = $row['opens_tracking'];
+			$links_tracking = $row['links_tracking'];
+
+		    //fetch exclude_lists
+		    $exclude_lists_field = $row['exclude_lists'];
+		    $exclude_lists_arr = array();
+		    $exclude_lists_update_sql = "";
+		    $exclude_lists_not_in_sql = "";
+		    if ($exclude_lists_field !== NULL && strlen($exclude_lists_field) > 0)
+		    {
+			    $exclude_lists_arr = explode(',', $exclude_lists_field);
+			    $exclude_lists_update_sql = ", exclude_lists = '".implode(',', $exclude_lists_arr)."' ";
+			    $exclude_lists_not_in_sql = get_exclude_list_user_id_sql(explode(',', $email_list), $exclude_lists_arr);
+		    }
 			
 			//Set language
 			$q_l = 'SELECT login.language FROM campaigns, login WHERE campaigns.id = '.$campaign_id.' AND login.app = campaigns.app';
@@ -124,6 +128,9 @@
 					$user_timezone = $row['timezone'];
 			    }  
 			}
+			
+			//Set default timezone
+			date_default_timezone_set($timezone!='0' && $timezone!='' ? $timezone : $user_timezone);
 			
 			//get smtp settings
 			$q3 = 'SELECT smtp_host, smtp_port, smtp_ssl, smtp_username, smtp_password FROM apps WHERE id = '.$app;
@@ -153,33 +160,36 @@
 				
 				//if sending for the first time
 				if($offset=='')
-				{
-					//Insert web version link
-					if(strpos($html, '</webversion>')==true)
+				{				
+					//If links tracking is enabled, insert links into database
+					if($links_tracking)
 					{
-						mysqli_query($mysqli, 'INSERT INTO links (campaign_id, link) VALUES ('.$campaign_id.', "'.APP_PATH.'/w/'.short($campaign_id).'")');
-					}
-				
-					//Insert into links
-					$links = array();
-					//extract all links from HTML
-					preg_match_all('/href=["\']([^"\']+)["\']/i', $html, $matches, PREG_PATTERN_ORDER);
-					$matches = array_unique($matches[1]);
-					foreach($matches as $var)
-					{    
-						$var = $query_string!='' ? ((strpos($var,'?') !== false) ? $var.'&'.$query_string : $var.'?'.$query_string) : $var;
-						//if(substr($var, 0, 1)!="#" && substr($var, 0, 6)!="mailto" && substr($var, 0, 3)!="tel" && substr($var, 0, 3)!="sms" && substr($var, 0, 13)!="[unsubscribe]" && substr($var, 0, 12)!="[webversion]")
-						if(substr($var, 0, 1)!="#" && substr($var, 0, 6)!="mailto" && substr($var, 0, 3)!="tel" && substr($var, 0, 3)!="sms" && substr($var, 0, 13)!="[unsubscribe]" && substr($var, 0, 12)!="[webversion]" && !strpos($var, 'fonts.googleapis.com'))
+						//Insert web version link
+						if(strpos($html, '</webversion>')==true)
 						{
-					    	array_push($links, $var);
-					    }
-					}
-					//extract unique links
-					for($i=0;$i<count($links);$i++)
-					{
-					    $q = 'INSERT INTO links (campaign_id, link) VALUES ('.$campaign_id.', "'.$links[$i].'")';
-					    $r = mysqli_query($mysqli, $q);
-					    if ($r){}
+							mysqli_query($mysqli, 'INSERT INTO links (campaign_id, link) VALUES ('.$campaign_id.', "'.APP_PATH.'/w/'.short($campaign_id).'")');
+						}
+						
+						//Insert into links
+						$links = array();
+						//extract all links from HTML
+						preg_match_all('/href=["\']([^"\']+)["\']/i', $html, $matches, PREG_PATTERN_ORDER);
+						$matches = array_unique($matches[1]);
+						foreach($matches as $var)
+						{    
+							$var = $query_string!='' ? ((strpos($var,'?') !== false) ? $var.'&'.$query_string : $var.'?'.$query_string) : $var;
+							if(substr($var, 0, 1)!="#" && substr($var, 0, 6)!="mailto" && substr($var, 0, 3)!="tel" && substr($var, 0, 3)!="sms" && substr($var, 0, 13)!="[unsubscribe]" && substr($var, 0, 12)!="[webversion]" && !strpos($var, 'fonts.googleapis.com'))
+							{
+						    	array_push($links, $var);
+						    }
+						}
+						//extract unique links
+						for($i=0;$i<count($links);$i++)
+						{
+						    $q = 'INSERT INTO links (campaign_id, link) VALUES ('.$campaign_id.', "'.$links[$i].'")';
+						    $r = mysqli_query($mysqli, $q);
+						    if ($r){}
+						}
 					}
 					
 					//Get and update number of recipients to send to
@@ -249,12 +259,16 @@
 						    	}
 						    	else $link = $row2['link'];
 								
-								//replace new links on HTML code
-						    	$html_treated = str_replace('href="'.$link.'"', 'href="'.APP_PATH.'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id).'"', $html_treated);
-						    	$html_treated = str_replace('href=\''.$link.'\'', 'href="'.APP_PATH.'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id).'"', $html_treated);
-						    	
-						    	//replace new links on Plain Text code
-						    	$plain_treated = str_replace($link, APP_PATH.'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id), $plain_treated);
+								//If link tracking is enabled, replace links with trackable links
+								if($links_tracking)
+								{
+									//replace new links on HTML code
+							    	$html_treated = str_replace('href="'.$link.'"', 'href="'.APP_PATH.'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id).'"', $html_treated);
+							    	$html_treated = str_replace('href=\''.$link.'\'', 'href="'.APP_PATH.'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id).'"', $html_treated);
+							    	
+							    	//replace new links on Plain Text code
+							    	$plain_treated = str_replace($link, APP_PATH.'/l/'.short($subscriber_id).'/'.short($linkID).'/'.short($campaign_id), $plain_treated);
+							    }
 						    }  
 						}
 						
@@ -262,6 +276,9 @@
 						preg_match_all('/\[([a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+),\s*fallback=/i', $title_treated, $matches_var, PREG_PATTERN_ORDER);
 						preg_match_all('/,\s*fallback=([a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*)\]/i', $title_treated, $matches_val, PREG_PATTERN_ORDER);
 						preg_match_all('/(\[[a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+,\s*fallback=[a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*\])/i', $title_treated, $matches_all, PREG_PATTERN_ORDER);
+						preg_match_all('/\[([^\]]+),\s*fallback=/i', $title_treated, $matches_var, PREG_PATTERN_ORDER);
+						preg_match_all('/,\s*fallback=([^\]]*)\]/i', $title_treated, $matches_val, PREG_PATTERN_ORDER);
+						preg_match_all('/(\[[^\]]+,\s*fallback=[^\]]*\])/i', $title_treated, $matches_all, PREG_PATTERN_ORDER);
 						$matches_var = $matches_var[1];
 						$matches_val = $matches_val[1];
 						$matches_all = $matches_all[1];
@@ -333,6 +350,9 @@
 						preg_match_all('/\[([a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+),\s*fallback=/i', $html_treated, $matches_var, PREG_PATTERN_ORDER);
 						preg_match_all('/,\s*fallback=([a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*)\]/i', $html_treated, $matches_val, PREG_PATTERN_ORDER);
 						preg_match_all('/(\[[a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+,\s*fallback=[a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*\])/i', $html_treated, $matches_all, PREG_PATTERN_ORDER);
+						preg_match_all('/\[([^\]]+),\s*fallback=/i', $html_treated, $matches_var, PREG_PATTERN_ORDER);
+						preg_match_all('/,\s*fallback=([^\]]*)\]/i', $html_treated, $matches_val, PREG_PATTERN_ORDER);
+						preg_match_all('/(\[[^\]]+,\s*fallback=[^\]]*\])/i', $html_treated, $matches_all, PREG_PATTERN_ORDER);
 						$matches_var = $matches_var[1];
 						$matches_val = $matches_val[1];
 						$matches_all = $matches_all[1];
@@ -403,6 +423,9 @@
 						preg_match_all('/\[([a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+),\s*fallback=/i', $plain_treated, $matches_var, PREG_PATTERN_ORDER);
 						preg_match_all('/,\s*fallback=([a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*)\]/i', $plain_treated, $matches_val, PREG_PATTERN_ORDER);
 						preg_match_all('/(\[[a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+,\s*fallback=[a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*\])/i', $plain_treated, $matches_all, PREG_PATTERN_ORDER);
+						preg_match_all('/\[([^\]]+),\s*fallback=/i', $plain_treated, $matches_var, PREG_PATTERN_ORDER);
+						preg_match_all('/,\s*fallback=([^\]]*)\]/i', $plain_treated, $matches_val, PREG_PATTERN_ORDER);
+						preg_match_all('/(\[[^\]]+,\s*fallback=[^\]]*\])/i', $plain_treated, $matches_all, PREG_PATTERN_ORDER);
 						$matches_var = $matches_var[1];
 						$matches_val = $matches_val[1];
 						$matches_all = $matches_all[1];
@@ -488,7 +511,7 @@
 						$title_treated = str_replace('[Email]', $email, $title_treated);
 						
 						//convert date tags
-						if($timezone!='' && $timezone!='0') date_default_timezone_set($timezone);
+						date_default_timezone_set($timezone!='' && $timezone!='0' ? $timezone : $user_timezone);
 						$today = time();
 						$currentdaynumber = strftime('%d', $today);
 						$currentday = strftime('%A', $today);
@@ -501,8 +524,12 @@
 						$plain_treated = str_replace($unconverted_date, $converted_date, $plain_treated);
 						$title_treated = str_replace($unconverted_date, $converted_date, $title_treated);
 				    	
-				    	//add tracking 1 by 1px image
-						$html_treated .= '<img src="'.APP_PATH.'/t/'.short($campaign_id).'/'.short($subscriber_id).'" alt=""/>';
+				    	//If opens tracking is enabled, add 1 x 1 px tracking image
+				    	if($opens_tracking)
+				    	{
+					    	//add tracking 1 by 1px image
+							$html_treated .= '<img src="'.APP_PATH.'/t/'.short($campaign_id).'/'.short($subscriber_id).'" alt="" style="width:1px;height:1px;"/>';
+						}
 						
 						//Get server path
 						$server_path_array = explode('scheduled.php', $_SERVER['SCRIPT_FILENAME']);
@@ -537,7 +564,8 @@
 						$mail->FromName   = $from_name;
 						$mail->Subject = $title_treated;
 						$mail->AltBody = $plain_treated;
-						$mail->MsgHTML($html_treated);
+						$mail->Body = $html_treated;
+						$mail->IsHTML(true);
 						$mail->AddAddress($email, $name);
 						$mail->AddReplyTo($reply_to, $from_name);
 						$mail->AddCustomHeader('List-Unsubscribe: <'.APP_PATH.'/unsubscribe/'.short($email).'/'.short($subscriber_list).'/'.short($campaign_id).'>');
@@ -684,6 +712,9 @@
 					preg_match_all('/\[([a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+),\s*fallback=/i', $title, $matches_var, PREG_PATTERN_ORDER);
 					preg_match_all('/,\s*fallback=([a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*)\]/i', $title, $matches_val, PREG_PATTERN_ORDER);
 					preg_match_all('/(\[[a-zA-Z0-9!#%^&*()+=$@._\-\:|\/?<>~`"\'\s]+,\s*fallback=[a-zA-Z0-9!,#%^&*()+=$@._\-\:|\/?<>~`"\'\s]*\])/i', $title, $matches_all, PREG_PATTERN_ORDER);
+					preg_match_all('/\[([^\]]+),\s*fallback=/i', $title, $matches_var, PREG_PATTERN_ORDER);
+					preg_match_all('/,\s*fallback=([^\]]*)\]/i', $title, $matches_val, PREG_PATTERN_ORDER);
+					preg_match_all('/(\[[^\]]+,\s*fallback=[^\]]*\])/i', $title, $matches_all, PREG_PATTERN_ORDER);
 					$matches_var = $matches_var[1];
 					$matches_val = $matches_val[1];
 					$matches_all = $matches_all[1];
@@ -795,10 +826,14 @@
 					$mail2->FromName   = $from_name;
 					$mail2->Subject = $title_to_me;
 					$mail2->AltBody = $message_to_me_plain;
-					$mail2->MsgHTML($message_to_me_html);
+					$mail2->Body = $message_to_me_html;
+					$mail2->IsHTML(true);
 					$mail2->AddAddress($from_email, $from_name); //send email to brand account owner
 					$mail2->AddBCC($user_email, $user_name); //send email to main account owner
 					$mail2->Send();
+					
+					//Zapier Trigger 'new_user_subscribed' event
+					zapier_trigger_new_campaign_sent($title_treated, $from_name, $from_email, $reply_to, strftime("%a, %b %d, %Y, %I:%M%p", $sent), APP_PATH.'/w/'.short($campaign_id), $app);
 					
 					//quit
 					exit;

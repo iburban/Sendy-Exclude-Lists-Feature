@@ -3,11 +3,6 @@
 <?php include('../helpers/short.php');?>
 <?php
 
-	/*echo '<pre>';
-	print_r($_POST);
-	echo '</pre>';
-	exit;*/
-
 	//get POST variables
 	$timezone = mysqli_real_escape_string($mysqli, $_POST['timezone']);
 	date_default_timezone_set($timezone);//set timezone
@@ -36,15 +31,15 @@
 		//$exclude_lists_update_sql = ', exclude_lists = "'.implode(',', $exclude_lists_arr).'" ';
 		$exclude_lists_update_sql = ', exclude_lists = "'.mysqli_real_escape_string($mysqli, $_POST['email_lists_exclude']).'" ';
 	}
-	
+
 	//adding sql for storing exclude_lists
-	$q = 'UPDATE campaigns SET send_date = "'.$the_date.'", lists = "'.$email_lists.'" '.$exclude_lists_update_sql.', timezone = "'.$timezone.'" WHERE id = '.$campaign_id;
-	$r = mysqli_query($mysqli, $q);
-	if ($r)
-	{
-		header("Location: ".get_app_info('path')."/app?i=".$app);
-	}
-	
+//	$q = 'UPDATE campaigns SET send_date = "'.$the_date.'", lists = "'.$email_lists.'" '.$exclude_lists_update_sql.', timezone = "'.$timezone.'" WHERE id = '.$campaign_id;
+//	$r = mysqli_query($mysqli, $q);
+//	if ($r)
+//	{
+//		header("Location: ".get_app_info('path')."/app?i=".$app);
+//	}
+
 	//Check if monthly quota needs to be updated
 	$q = 'SELECT allocated_quota, current_quota FROM apps WHERE id = '.$app;
 	$r = mysqli_query($mysqli, $q);
@@ -54,15 +49,30 @@
 		{
 			$allocated_quota = $row['allocated_quota'];
 			$current_quota = $row['current_quota'];
-			$updated_quota = $current_quota + $total_recipients;
 		}
 	}
 	//Update quota if a monthly limit was set
 	if($allocated_quota!=-1)
 	{
+		//Get the existing number of quota_deducted
+		$q = 'SELECT quota_deducted FROM campaigns WHERE id = '.$campaign_id;
+		$r = mysqli_query($mysqli, $q);
+		if ($r) 
+		{
+			while($row = mysqli_fetch_array($r)) 
+			{
+				$current_quota_deducted = $row['quota_deducted']=='' ? 0 : $row['quota_deducted'];
+			}
+			$updated_quota = ($current_quota + $total_recipients) - $current_quota_deducted;
+		}
+		
 		//if so, update quota
 		$q = 'UPDATE apps SET current_quota = '.$updated_quota.' WHERE id = '.$app;
 		mysqli_query($mysqli, $q);
 	}
-
+	
+	//Schedule the campaign
+	$q = 'UPDATE campaigns SET send_date = "'.$the_date.'", lists = "'.$email_lists.'" '.$exclude_lists_update_sql.', timezone = "'.$timezone.'", quota_deducted = '.$total_recipients.' WHERE id = '.$campaign_id;
+	$r = mysqli_query($mysqli, $q);
+	if ($r) header("Location: ".get_app_info('path')."/app?i=".$app);
 ?>

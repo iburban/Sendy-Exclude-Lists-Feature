@@ -1,5 +1,5 @@
 # Sendy-Exclude-Lists-Feature
-Works only with Sendy 2.0.4
+Currently works only with Sendy 2.1.2.8
 
 Instructions:
 
