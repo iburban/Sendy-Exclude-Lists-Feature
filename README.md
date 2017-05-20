@@ -10,4 +10,4 @@ Instructions:
 
 That should be it. Now when you create a new campaign you'll have an option to select which lists you'd like to exclude.
 
-Adapted from Igor's version for Sendy 2.0.3 https://sendy.co/forum/discussion/5827/mod-exclude-lists-feature
+Originated from https://sendy.co/forum/discussion/5827/mod-exclude-lists-feature
